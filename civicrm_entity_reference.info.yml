@@ -1,0 +1,8 @@
+name: CiviCRM entity reference
+type: module
+description: 'Provides entity reference fields to CiviCRM entities referencing other CiviCRM entities such as Contact to Address.'
+core_version_requirement: ^8.8 || ^9
+package: CiviCRM
+dependencies:
+  - civicrm_entity:civicrm_entity
+  - inline_entity_form:inline_entity_form

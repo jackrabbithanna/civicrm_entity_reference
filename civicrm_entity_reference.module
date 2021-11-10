@@ -1,0 +1,133 @@
+<?php
+
+/**
+ * @file
+ * Contains civicrm_entity_reference.module.
+ */
+
+use Drupal\civicrm_entity\Entity\CivicrmEntity;
+use Drupal\civicrm_entity\SupportedEntities;
+use Drupal\Core\Entity\EntityTypeInterface;
+use Drupal\Core\Entity\FieldableEntityInterface;
+use Drupal\Core\Field\BaseFieldDefinition;
+use Drupal\Core\Field\FieldStorageDefinitionInterface;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\StringTranslation\TranslatableMarkup;
+
+/**
+ * Implements hook_entity_base_field_info().
+ */
+function civicrm_entity_reference_entity_base_field_info(EntityTypeInterface $entity_type) {
+  $fields = [];
+  if ($entity_type->get('civicrm_entity_ui_exposed')) {
+    /** @var \Drupal\Core\Config\ImmutableConfig $config */
+    $config = \Drupal::config('civicrm_entity.settings');
+    $enabled_entity_types = $config->get('enabled_entity_types') ?: [];
+
+    foreach (SupportedEntities::getInfo() as $entity_type_id => $civicrm_entity_info) {
+      if (!in_array($entity_type_id, $enabled_entity_types) || $entity_type_id === $entity_type->id()) {
+        continue;
+      }
+
+      // Check if this is an entityreference field by doing similar to
+      // \Drupal\civicrm_entity\Entity\FieldDefinitionProvider::getBaseFieldDefinition().
+      $civicrm_fields = \Drupal::service('civicrm_entity.api')
+        ->getFields($civicrm_entity_info['civicrm entity name'], 'create');
+
+      foreach ($civicrm_fields as $civicrm_field) {
+        if ($civicrm_field['type'] === \CRM_Utils_Type::T_INT && isset($civicrm_field['FKClassName'])) {
+          $foreign_key_dao = '\\' . $civicrm_field['FKClassName'];
+          $table_name = $foreign_key_dao::getTableName();
+
+          if ($table_name === $entity_type->id()) {
+            $fields["reverse_$entity_type_id"] = BaseFieldDefinition::create('entity_reference')
+              ->setDisplayConfigurable('view', TRUE)
+              ->setLabel(new TranslatableMarkup('Reverse @label', ['@label' => $civicrm_entity_info['civicrm entity label']]))
+              ->setDisplayConfigurable('form', TRUE)
+              ->setSetting('target_type', $entity_type_id)
+              ->setSetting('handler', 'default')
+              ->setSetting('civicrm_field', $civicrm_field)
+              ->setCustomStorage(TRUE)
+              ->setCardinality(FieldStorageDefinitionInterface::CARDINALITY_UNLIMITED)
+              ->setDisplayOptions('form', [
+                'type' => 'inline_entity_form_complex',
+                'weight' => 0,
+              ]);
+          }
+        }
+      }
+    }
+  }
+
+  return $fields;
+}
+
+/**
+ * Implements hook_inline_entity_form_entity_form_alter().
+ */
+function civicrm_entity_reference_inline_entity_form_entity_form_alter(array &$entity_form, FormStateInterface &$form_state) {
+  /** @var \Drupal\civicrm_entity\Form\CivicrmEntityForm $form_object */
+  $form_object = $form_state->getFormObject();
+  /** @var \Drupal\civicrm_entity\Entity\CivicrmEntity $entity */
+  $entity = $form_object->getEntity();
+
+  if (($entity instanceof CivicrmEntity) && $entity->hasField($entity_form['#parents'][0])) {
+    $civicrm_field = $entity
+      ->get($entity_form['#parents'][0])
+      ->getFieldDefinition()
+      ->getSetting('civicrm_field');
+
+    $entity_form[$civicrm_field['name']]['widget'][0]['target_id']['#default_value'] = $entity;
+    $entity_form[$civicrm_field['name']]['#disabled'] = TRUE;
+  }
+}
+
+/**
+ * Implements hook_entity_field_values_init().
+ */
+function civicrm_entity_reference_entity_field_values_init(FieldableEntityInterface $entity) {
+  if ($entity instanceof CivicrmEntity) {
+    $field_definitions = $entity->getFieldDefinitions();
+    $civicrm_api = \Drupal::service('civicrm_entity.api');
+
+    foreach ($field_definitions as $definition) {
+      if ($definition->getType() === 'entity_reference' && strpos($definition->getName(), 'reverse_') !== FALSE) {
+        $civicrm_field = $definition->getSetting('civicrm_field');
+        $supported_entities = SupportedEntities::getInfo();
+
+        if (isset($civicrm_field) && isset($supported_entities[$definition->getSetting('target_type')])) {
+          // Find referencing entities.
+          $result = $civicrm_api->get($supported_entities[$definition->getSetting('target_type')]['civicrm entity name'], [
+            'sequential' => 1,
+            'return' => ['id'],
+            $civicrm_field['name'] => $entity->id(),
+          ]);
+
+          $entity->set($definition->getName(), array_column($result, 'id'));
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function civicrm_entity_reference_form_entity_form_display_edit_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+  $supported_entities = SupportedEntities::getInfo();
+
+  if (!in_array($form['#entity_type'], array_keys($supported_entities))) {
+    return;
+  }
+
+  $field_definitions = \Drupal::service('entity_field.manager')->getBaseFieldDefinitions($form['#entity_type']);
+  foreach ($field_definitions as $definition) {
+    if ($definition->getType() === 'entity_reference' && strpos($definition->getName(), 'reverse_') !== FALSE) {
+      foreach ($form['fields'][$definition->getName()]['plugin']['type']['#options'] as $key => $option) {
+        if ($key !== 'inline_entity_form_complex') {
+          unset($form['fields'][$definition->getName()]['plugin']['type']['#options'][$key]);
+        }
+      }
+    }
+  }
+}
